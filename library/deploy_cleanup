@@ -1,0 +1,150 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+# (c) 2013, Janis Gengeris <janis.gengeris@gmail.com>
+#
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
+DOCUMENTATION = '''
+---
+module: deploy_cleanup
+author: Janis Gengeris
+version_added: "1.1"
+short_description: Cleanup deployment version directory
+description:
+    - Cleanup deployment version directory on destination host
+options:
+    dest:
+        required: true
+        description:
+            - Destination of the root deployment directory
+    keep_current:
+        required: false
+        default: "yes"
+        choices: [ "yes", "no" ]
+        description:
+            - Unless set to C(no), the version that is linked to C(current)
+              in deployment root will be preverved.
+    keep_releases:
+        required: false
+        default: 5
+        description:
+            - Count of how many versions to keep, can be in range starting from
+              0.
+examples:
+    - code: 'deploy_cleanup: dest=/home/www/wordpress'
+      description: leave last 5 versions including current one
+    - code: 'deploy_cleanup: dest=/home/www/wordpress keep_releases=0'
+      description: delete all versions except the one linked from current
+    - code: 'deploy_cleanup: dest=/home/www/wordpress keep_releases=0 keep_current=no'
+      description: delete all versions including current
+'''
+
+import os
+import shutil
+
+
+def sorted_ls(path, reverse=True):
+    mtime = lambda f: os.stat(os.path.join(path, f)).st_mtime
+    return list(sorted(os.listdir(path), key=mtime, reverse=reverse))
+
+
+def can_delete(files):
+    for file in files:
+        if not os.access(file, os.W_OK):
+            return False
+    return True
+
+
+def _remove_files(files):
+    removed = []
+    failed = []
+    for file in files:
+        try:
+            if os.path.isfile(file):
+                os.remove(file)
+            else:
+                shutil.rmtree(file)
+            removed.append(file)
+        except OSError:
+            failed.append(file)
+    return (removed, failed)
+
+
+def remove_files(files):
+    (removed, failed) = _remove_files(files)
+    ret_args = dict()
+    if len(removed) > 0 and len(failed) == 0:
+        ret_args['changed'] = True
+        ret_args['msg'] = "Removed %s files from directory '%s': %s" % \
+            (len(removed), os.getcwd(), str(removed))
+    else:
+        ret_args['changed'] = False
+        ret_args['msg'] = "Removed %s files" % len(removed)
+        if len(failed) > 0:
+            ret_args['msg'] += ", Failed %s files: %s" % \
+                (len(failed), str(failed))
+    return ret_args
+
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            dest=dict(required=True, type='str'),
+            keep_current=dict(default='yes', type='bool'),
+            keep_releases=dict(default=5, type='int')
+        ),
+        supports_check_mode=True
+    )
+
+    dest = os.path.abspath(os.path.expanduser(module.params['dest']))
+    keep_current = module.params['keep_current']
+    keep_releases = module.params['keep_releases']
+
+    versions_path = dest + '/versions'
+    current_path = dest + '/current'
+
+    if not os.path.exists(dest):
+        module.fail_json(msg="Failed to find destination %s" % (dest))
+    if not os.access(dest, os.W_OK):
+        module.fail_json(msg="Destination %s not writeable" % (dest))
+    if keep_releases < 0:
+        module.fail_json(msg="keep_releases should be greater or equal to 0")
+    if not os.path.exists(versions_path):
+        module.fail_json(msg="Can't find versions directory %s" % (versions_path))
+    if not os.path.exists(current_path):
+        module.fail_json(msg="Can't find current path %s" % (current_path))
+
+    files = sorted_ls(versions_path)
+    to_remove = files[keep_releases:]
+
+    current_real_target = os.path.basename(os.path.realpath(current_path))
+
+    # remove the current version from removal list
+    if keep_current and current_real_target in to_remove:
+        to_remove.remove(current_real_target)
+
+    # chdir and apply deletions
+    os.chdir(versions_path)
+    if can_delete(to_remove):
+        ret = remove_files(to_remove)
+        module.exit_json(**ret)
+    else:
+        module.fail_json(msg="Can't delete, file permission problems")
+
+# include magic from lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()
