@@ -1,0 +1,120 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+# (c) 2013, Janis Gengeris <janis.gengeris@gmail.com>
+#
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
+DOCUMENTATION = '''
+---
+module: deploy_rollback
+author: Janis Gengeris
+version_added: "1.1"
+short_description: Rollback to previous version
+description:
+    - Rollback to previous deployment version
+options:
+    dest:
+        required: true
+        description:
+            - Destination of the root deployment directory
+    step:
+        required: false
+        default: 1
+        description:
+            - Count, how many versions to roll back. Should now
+              exceed the available version directory number.
+examples:
+    - code: 'deploy_rollback: dest=/home/www/wordpress'
+      description: rollback single version
+    - code: 'deploy_rollback: dest=/home/www/wordpress step=3'
+      description: rollback three versions
+'''
+
+import os
+
+
+def sorted_ls(path, reverse=True):
+    mtime = lambda f: os.stat(os.path.join(path, f)).st_mtime
+    return list(sorted(os.listdir(path), key=mtime, reverse=reverse))
+
+
+def _do_rollback(module, versions, versions_path, current_path, step):
+    current_real_target = os.path.basename(os.path.realpath(current_path))
+
+    try:
+        curr_ndx = versions.index(current_real_target)
+    except ValueError:
+        module.fail_json(msg="Current version '%s' not found in versions dir"
+                         % (current_real_target))
+
+    if (curr_ndx + 1) == len(versions):
+        module.fail_json(msg="Can't rollback, current version is "
+                         "linked to last available version '%s'"
+                         % (current_real_target))
+    elif (curr_ndx + step) >= len(versions):
+        module.fail_json(msg="Can't rollback, new version index is outside of "
+                         "available version list")
+
+    # the actual rollback happens here
+    next_version = versions[curr_ndx + step]
+    os.unlink(current_path)
+    os.symlink(versions_path + '/' + next_version, current_path)
+
+    return dict(
+        changed=True,
+        msg="Rolled back to version '%s'" % (next_version))
+
+
+def do_rollback(module, params):
+    dest = os.path.abspath(os.path.expanduser(params['dest']))
+    rollback_step = params['step']
+
+    versions_path = dest + '/versions'
+    current_path = dest + '/current'
+
+    if not os.path.exists(dest):
+        module.fail_json(msg="Failed to find destination %s" % (dest))
+    if not os.access(dest, os.W_OK):
+        module.fail_json(msg="Destination %s not writeable" % (dest))
+    if rollback_step < 0:
+        module.fail_json(msg="step should be greater or equal to 0")
+    if not os.path.exists(versions_path):
+        module.fail_json(msg="Can't find versions directory %s" %
+                         (versions_path))
+    if not os.path.exists(current_path):
+        module.fail_json(msg="Can't find current path%s" % (current_path))
+
+    versions = sorted_ls(versions_path)
+
+    return _do_rollback(module, versions, versions_path, current_path,
+                        rollback_step)
+
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            dest=dict(required=True),
+            step=dict(default=1, type='int')
+        )
+    )
+
+    results = do_rollback(module, module.params)
+    module.exit_json(**results)
+
+# include magic from lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()
